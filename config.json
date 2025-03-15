@@ -1,0 +1,30 @@
+{
+  "$schema": "./config-schema.json",
+  "urls": [
+    {
+      "path": "https://mkrs-beta.vercel.app",
+      "seq": ["mkrs", "ьлкы", "мкрс", "vrhc"],
+      "description": "MKRS - Small chinese-russian dictionary"
+    },
+    {
+      "path": "https://bkrs.info",
+      "seq": ["bkrs", "илкы", "бкрс", ",rhc"],
+      "description": "BKRS - Big chinese-russian dictionary"
+    },
+    {
+      "path": "https://youtube.com",
+      "seq": ["y", "н"],
+      "description": "Youtube"
+    },
+    {
+      "path": "https://twitch.tv",
+      "seq": ["tw.", "ецю"],
+      "description": "Twitch"
+    },
+    {
+      "path": "https://twitch.tv/directory/all/tags/中文",
+      "seq": ["twc", "ецс"],
+      "description": "Twitch / Chinese"
+    }
+  ]
+}

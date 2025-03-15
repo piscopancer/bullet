@@ -1,0 +1,45 @@
+{
+  "$schema": "http://json-schema.org/draft-04/schema",
+  "definitions": {
+    "shortcut": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "seq": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": ["path", "seq"],
+      "additionalProperties": false
+    }
+  },
+  "type": "object",
+  "properties": {
+    "apps": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/shortcut"
+      }
+    },
+    "dirs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/shortcut"
+      }
+    },
+    "urls": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/shortcut"
+      }
+    }
+  }
+}

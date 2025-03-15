@@ -9,7 +9,6 @@ use ratatui::{
   widgets::{ Block, BorderType, Cell, Padding, Paragraph, Row, Table },
 };
 use serde::{ Deserialize };
-use toml::from_str;
 use tui_textarea::TextArea;
 
 #[derive(Deserialize, Debug, Clone)]
@@ -49,17 +48,19 @@ impl ShortcutsTrait for Vec<Shortcut> {
 #[derive(Debug)]
 enum LoadConfigError {
   IoError(std::io::Error),
-  ParseError(toml::de::Error),
+  ParseError(serde_json::Error),
 }
 
 struct App {
   config: Result<Shortcuts, LoadConfigError>,
   matches: MatchedShortcuts,
+  running: bool,
 }
 
 impl App {
   fn new() -> Self {
     App {
+      running: true,
       config: App::load_config(),
       matches: MatchedShortcuts {
         urls: None,
@@ -69,20 +70,25 @@ impl App {
     }
   }
   fn load_config() -> Result<Shortcuts, LoadConfigError> {
-    let f = File::open("./cfg.toml");
+    let f = File::open("./config.json");
     if f.is_err() {
       return Err(LoadConfigError::IoError(f.err().unwrap()));
     }
     let mut content = String::new();
     f.map(|mut f| f.read_to_string(&mut content));
-    let cfg = toml::from_str::<Shortcuts>(&content);
+    let cfg = serde_json::from_str::<Shortcuts>(&content);
     cfg.map_err(|e| LoadConfigError::ParseError(e))
   }
-  fn find_matches(&mut self, search: String) {
+  fn search_matches(&mut self, search: String) {
     if let Ok(config) = &self.config {
       self.matches.apps = config.apps.as_ref().map(|a| a.find(search.clone()));
       self.matches.dirs = config.dirs.as_ref().map(|d| d.find(search.clone()));
       self.matches.urls = config.urls.as_ref().map(|u| u.find(search.clone()));
+    }
+    if search == "mkrs" {
+      // open::that_detached("https://mkrs-beta.vercel.app");
+      open::that_detached("C:/Users/Igor/Pictures/Warframe/Warframe0000.jpg");
+      self.running = false;
     }
   }
 }
@@ -100,6 +106,9 @@ fn main() {
   );
 
   loop {
+    if !app.running {
+      break;
+    }
     term.draw(|frame| {
       let layout = Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]);
       let [search_area, main_area] = layout.areas(frame.area());
@@ -129,18 +138,29 @@ fn main() {
       );
 
       frame.render_widget(&search_input, search_area);
-      frame.render_widget(&shortcuts_table, main_area);
+      match &app.config {
+        Ok(_) => {
+          frame.render_widget(&shortcuts_table, main_area);
+        }
+        Err(e) => {
+          let error_p = Paragraph::new(match e {
+            LoadConfigError::IoError(e) => e.to_string(),
+            LoadConfigError::ParseError(e) => e.to_string(),
+          });
+          frame.render_widget(&error_p, main_area);
+        }
+      }
     });
     if poll(Duration::from_millis(100)).unwrap() {
       if let event::Event::Key(key_event) = event::read().unwrap() {
         match key_event.code {
           KeyCode::Esc => {
-            break;
+            app.running = false;
           }
           _ => {
             search_input.input(key_event);
             let search = search_input.lines()[0].clone();
-            app.find_matches(search);
+            app.search_matches(search);
           }
         }
       }

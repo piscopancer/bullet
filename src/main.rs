@@ -1,34 +1,85 @@
 #![allow(unused_must_use, unused_variables, dead_code, warnings)]
 
-use std::{ cell::RefCell, fs::File, io::Read, time::Duration };
+use core::fmt;
+use std::{
+  cell::RefCell,
+  fmt::{ Display, Formatter },
+  fs::File,
+  io::Read,
+  path::Path,
+  process::Command,
+  thread::sleep,
+  time::Duration,
+};
 use crossterm::event::{ self, poll, KeyCode, KeyEvent };
+use directories::{ BaseDirs, ProjectDirs, UserDirs };
 use ratatui::{
   layout::{ Constraint, Layout, Rows },
   style::{ Style, Styled, Stylize },
-  text::Line,
+  text::{ Line, Span },
   widgets::{ Block, BorderType, Cell, Padding, Paragraph, Row, Table },
 };
 use serde::{ Deserialize };
 use tui_textarea::TextArea;
 
 #[derive(Deserialize, Debug, Clone)]
+enum ShortcutKind {
+  #[serde(rename = "app")]
+  App,
+  #[serde(rename = "dir")]
+  Dir,
+  #[serde(rename = "file")]
+  File,
+  #[serde(rename = "url")]
+  Url,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+enum ShortcutPathPrefix {
+  #[serde(rename = "documents")]
+  Documents,
+  #[serde(rename = "appdata")]
+  Appdata,
+}
+
+#[derive(Deserialize, Debug, Clone)]
 struct Shortcut {
   path: String,
   seq: Vec<String>,
-  description: String,
+  description: Option<String>,
+  kind: ShortcutKind,
+  path_prefix: Option<ShortcutPathPrefix>,
+}
+
+impl Shortcut {
+  /// Returns with prefixed path if `path_prefix` is defined, just `path` otherwise
+  fn get_prefixed_path(&self) -> String {
+    let mut path = self.path.clone();
+    if let Some(prefix) = &self.path_prefix {
+      path = Path::new(&prefix.to_string()).join(path).to_str().unwrap().to_string();
+    }
+    path
+  }
+}
+
+impl Display for ShortcutPathPrefix {
+  fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    write!(f, "{}", match self {
+      ShortcutPathPrefix::Documents => {
+        let user_dirs = UserDirs::new().unwrap();
+        user_dirs.document_dir().unwrap().to_str().unwrap().to_string().replace("\\", "/")
+      }
+      ShortcutPathPrefix::Appdata => {
+        let base_dirs = BaseDirs::new().unwrap();
+        base_dirs.config_dir().to_str().unwrap().to_string().replace("\\", "/")
+      }
+    })
+  }
 }
 
 #[derive(Deserialize, Debug)]
-struct Shortcuts {
-  urls: Option<Vec<Shortcut>>,
-  dirs: Option<Vec<Shortcut>>,
-  apps: Option<Vec<Shortcut>>,
-}
-
-struct MatchedShortcuts {
-  urls: Option<Vec<Shortcut>>,
-  dirs: Option<Vec<Shortcut>>,
-  apps: Option<Vec<Shortcut>>,
+struct Config {
+  shortcuts: Vec<Shortcut>,
 }
 
 trait ShortcutsTrait {
@@ -36,7 +87,10 @@ trait ShortcutsTrait {
 }
 
 impl ShortcutsTrait for Vec<Shortcut> {
-  fn find(&self, search: String) -> Vec<Shortcut> {
+  fn find(&self, search: String) -> Self {
+    if search.trim().is_empty() {
+      return self.to_vec();
+    }
     self
       .iter()
       .filter(|s| s.seq.iter().any(|seq| seq.contains(&search)))
@@ -49,46 +103,65 @@ impl ShortcutsTrait for Vec<Shortcut> {
 enum LoadConfigError {
   IoError(std::io::Error),
   ParseError(serde_json::Error),
+  NoConfig,
 }
 
 struct App {
-  config: Result<Shortcuts, LoadConfigError>,
-  matches: MatchedShortcuts,
+  config: Result<Config, LoadConfigError>,
+  matched_shortcuts: Vec<Shortcut>,
   running: bool,
 }
 
 impl App {
   fn new() -> Self {
-    App {
+    let mut app = App {
       running: true,
       config: App::load_config(),
-      matches: MatchedShortcuts {
-        urls: None,
-        dirs: None,
-        apps: None,
-      },
+      matched_shortcuts: vec![],
+    };
+    if let Ok(config) = &app.config {
+      app.matched_shortcuts = config.shortcuts.clone();
     }
+    app
   }
-  fn load_config() -> Result<Shortcuts, LoadConfigError> {
-    let f = File::open("./config.json");
-    if f.is_err() {
-      return Err(LoadConfigError::IoError(f.err().unwrap()));
+  fn load_config() -> Result<Config, LoadConfigError> {
+    let config_path = UserDirs::new().map(|user_dirs|
+      user_dirs.document_dir().unwrap().join("bullet/config.json").to_str().unwrap().to_string()
+    );
+    if config_path.is_none() {
+      return Err(LoadConfigError::NoConfig);
+    }
+    let config_file = File::open(config_path.unwrap());
+    if config_file.is_err() {
+      return Err(LoadConfigError::IoError(config_file.err().unwrap()));
     }
     let mut content = String::new();
-    f.map(|mut f| f.read_to_string(&mut content));
-    let cfg = serde_json::from_str::<Shortcuts>(&content);
-    cfg.map_err(|e| LoadConfigError::ParseError(e))
+    config_file.map(|mut f| f.read_to_string(&mut content));
+    let config = serde_json::from_str::<Config>(&content);
+    config.map_err(|e| LoadConfigError::ParseError(e))
   }
-  fn search_matches(&mut self, search: String) {
-    if let Ok(config) = &self.config {
-      self.matches.apps = config.apps.as_ref().map(|a| a.find(search.clone()));
-      self.matches.dirs = config.dirs.as_ref().map(|d| d.find(search.clone()));
-      self.matches.urls = config.urls.as_ref().map(|u| u.find(search.clone()));
+  fn find_and_handle_matches(&mut self, search: String) {
+    if let Ok(cfg) = &self.config {
+      self.matched_shortcuts = cfg.shortcuts.find(search.clone());
     }
-    if search == "mkrs" {
-      // open::that_detached("https://mkrs-beta.vercel.app");
-      open::that_detached("C:/Users/Igor/Pictures/Warframe/Warframe0000.jpg");
-      self.running = false;
+    let path: Option<String> = {
+      if self.matched_shortcuts.len() == 1 {
+        Some(self.matched_shortcuts[0].get_prefixed_path())
+      } else {
+        self.matched_shortcuts
+          .iter()
+          .find(|s| s.seq.iter().any(|seq| *seq == search))
+          .map(|s| s.get_prefixed_path())
+      }
+    };
+    if let Some(p) = path {
+      let shortcut_res = open::that_detached(p);
+      match shortcut_res {
+        Ok(_) => {
+          self.running = false;
+        }
+        Err(_) => {}
+      }
     }
   }
 }
@@ -113,29 +186,102 @@ fn main() {
       let layout = Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]);
       let [search_area, main_area] = layout.areas(frame.area());
 
-      let table_pairs: [(&str, &Option<Vec<Shortcut>>); 3] = [
-        ("Apps", &app.matches.apps),
-        ("Dirs", &app.matches.dirs),
-        ("Urls", &app.matches.urls),
-      ];
+      let (matched_apps, matched_dirs, matched_files, matched_urls) = {
+        let mut apps: Vec<Shortcut> = vec![];
+        let mut urls: Vec<Shortcut> = vec![];
+        let mut dirs: Vec<Shortcut> = vec![];
+        let mut files: Vec<Shortcut> = vec![];
+        for s in &app.matched_shortcuts {
+          match s.kind {
+            ShortcutKind::App => apps.push(s.clone()),
+            ShortcutKind::File => files.push(s.clone()),
+            ShortcutKind::Dir => dirs.push(s.clone()),
+            ShortcutKind::Url => urls.push(s.clone()),
+          }
+        }
+        (apps, dirs, files, urls)
+      };
 
       let mut table_rows: Vec<Row> = Vec::new();
-      for pair in table_pairs {
-        let (title, shortcuts) = pair;
-        if let Some(shortcuts) = shortcuts.as_ref() {
-          table_rows.push(Row::new(vec![Cell::new(Line::from(title).centered().dark_gray())]));
+      for shortcuts in [matched_apps, matched_dirs, matched_files, matched_urls] {
+        if shortcuts.len() > 0 {
           for s in shortcuts {
-            let keys = &s.seq[0];
-            let desc = &s.description;
-            let cells = vec![Cell::new(keys.clone()), Cell::new(desc.clone())];
-            table_rows.push(Row::new(cells));
+            let seq = s.seq[0].clone();
+            match s.kind {
+              ShortcutKind::App => {
+                let desc = &s.description.unwrap_or("".to_string());
+                let cells = vec![
+                  Cell::new(
+                    Line::from(vec![Span::from(">__ ").red(), Span::from(seq).bold().light_red()])
+                  ),
+                  Cell::new(desc.clone())
+                ];
+                table_rows.push(Row::new(cells));
+              }
+              ShortcutKind::Dir => {
+                let path = s.path.clone();
+                let prefix = s.path_prefix.map(|p| p.to_string());
+                let cells = vec![
+                  Cell::new(
+                    Line::from(
+                      vec![Span::from("[_] ").green(), Span::from(seq).bold().light_green()]
+                    )
+                  ),
+                  Cell::new(
+                    Line::from({
+                      let mut spans = vec![];
+                      if let Some(p) = prefix {
+                        spans.push(Span::from(p).underlined());
+                        spans.push(Span::from("/").underlined());
+                      }
+                      spans.push(Span::from(path));
+                      spans
+                    })
+                  )
+                ];
+                table_rows.push(Row::new(cells));
+              }
+              ShortcutKind::File => {
+                let path = s.path.clone();
+                let prefix = s.path_prefix.map(|p| p.to_string());
+                let cells = vec![
+                  Cell::new(
+                    Line::from(
+                      vec![Span::from("[_] ").yellow(), Span::from(seq).bold().light_yellow()]
+                    )
+                  ),
+                  Cell::new(
+                    Line::from({
+                      let mut spans = vec![];
+                      if let Some(p) = prefix {
+                        spans.push(Span::from(p).underlined());
+                        spans.push(Span::from("/").underlined());
+                      }
+                      spans.push(Span::from(path));
+                      spans
+                    })
+                  )
+                ];
+                table_rows.push(Row::new(cells));
+              }
+              ShortcutKind::Url => {
+                let desc = s.description.unwrap_or_default();
+                let cells = vec![
+                  Cell::new(
+                    Line::from(vec![Span::from("(#) ").blue(), Span::from(seq).bold().light_blue()])
+                  ),
+                  Cell::new(desc)
+                ];
+                table_rows.push(Row::new(cells));
+              }
+            }
           }
         }
       }
       let mut shortcuts_table = Table::new(
         table_rows,
-        vec![Constraint::Length(5), Constraint::Fill(1)]
-      );
+        vec![Constraint::Length(8), Constraint::Fill(1)]
+      ).column_spacing(1);
 
       frame.render_widget(&search_input, search_area);
       match &app.config {
@@ -146,6 +292,8 @@ fn main() {
           let error_p = Paragraph::new(match e {
             LoadConfigError::IoError(e) => e.to_string(),
             LoadConfigError::ParseError(e) => e.to_string(),
+            LoadConfigError::NoConfig =>
+              "Config does not exist in \"documents/bullet/config.json\"".to_string(),
           });
           frame.render_widget(&error_p, main_area);
         }
@@ -160,7 +308,7 @@ fn main() {
           _ => {
             search_input.input(key_event);
             let search = search_input.lines()[0].clone();
-            app.search_matches(search);
+            app.find_and_handle_matches(search);
           }
         }
       }

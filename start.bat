@@ -1,0 +1,1 @@
+alacritty -o window.opacity=0.5 -o window.startup_mode=\"Fullscreen\" -e C:/dev/other/rust/kaoyao/target/release/kaoyao.exe
